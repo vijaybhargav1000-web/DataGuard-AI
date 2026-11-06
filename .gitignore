@@ -1,6 +1,28 @@
+# Python
 .venv/
-.env
 __pycache__/
 .pytest_cache/
 *.pyc
+
+# Environment and secrets
+.env
+.env.*
+
+# Logs
 logs/
+airflow/logs/
+
+# Database files
+*.duckdb
+*.duckdb.wal
+
+# Generated transaction data
+data/raw/*.jsonl
+data/processed/*.jsonl
+data/quarantine/*.jsonl
+
+# dbt generated files
+dataguard_analytics/target/
+dataguard_analytics/logs/
+dataguard_analytics/dbt_packages/
+airflow/config/.user.yml

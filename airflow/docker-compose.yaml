@@ -1,0 +1,28 @@
+services:
+  airflow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dataguard-airflow:3.3.2
+    container_name: dataguard-airflow
+    command: standalone
+
+    ports:
+      - "8080:8080"
+
+    environment:
+      AIRFLOW_HOME: /opt/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      DBT_PROFILES_DIR: /opt/dataguard/airflow/config
+
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./config:/opt/airflow/config
+      - ..:/opt/dataguard
+      - airflow_data:/opt/airflow
+
+    restart: unless-stopped
+
+volumes:
+  airflow_data:

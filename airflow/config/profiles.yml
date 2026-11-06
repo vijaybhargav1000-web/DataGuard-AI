@@ -1,0 +1,8 @@
+dataguard_analytics:
+  target: dev
+
+  outputs:
+    dev:
+      type: duckdb
+      path: /opt/dataguard/data/processed/dataguard.duckdb
+      threads: 1
