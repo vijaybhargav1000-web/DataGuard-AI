@@ -1,0 +1,35 @@
+version: 2
+
+models:
+
+  - name: stg_transactions
+    description: "Cleaned and validated transaction records"
+
+    columns:
+
+      - name: transaction_id
+        description: "Unique transaction identifier"
+        data_tests:
+          - unique
+          - not_null
+
+      - name: customer_id
+        description: "Customer identifier"
+        data_tests:
+          - not_null
+
+      - name: amount
+        description: "Transaction amount"
+        data_tests:
+          - not_null
+
+      - name: payment_status
+        description: "Transaction payment status"
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - SUCCESS
+                  - FAILED
+                  - PENDING
