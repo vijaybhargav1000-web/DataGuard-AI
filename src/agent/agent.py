@@ -4,170 +4,225 @@ import requests
 
 from incident_investigator import (
     investigate_incidents,
-    get_incident_evidence,
+    investigate_incident,
 )
+
+from report_validator import validate_investigation_result
+
+from remediation_workflow import run_remediation_workflow
+
 
 MODEL = "qwen2.5:1.5b"
 OLLAMA_URL = "http://localhost:11434/api/chat"
 
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_incident_summary",
-            "description": "Get counts of all quarantined incident types.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_incident_evidence",
-            "description": "Retrieve actual quarantined transaction records for an incident type.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "issue_type": {
-                        "type": "string",
-                        "enum": [
-                            "MISSING_CUSTOMER_ID",
-                            "NEGATIVE_AMOUNT",
-                            "MISSING_AMOUNT",
-                            "UNEXPECTED_SCHEMA_COLUMNS",
-                            "DUPLICATE_TRANSACTION_ID",
-                        ],
-                    }
-                },
-                "required": ["issue_type"],
-            },
-        },
-    },
-]
 
+def generate_ai_explanation(incident, evidence_summary):
+    """Generate a short explanation using verified facts."""
 
-SYSTEM_PROMPT = """
-You are DataGuard AI, a production data quality incident investigator.
+    prompt = f"""
+You are a data engineering incident analyst.
 
-Your responsibility is to investigate incidents using the available
-Python tools.
+Explain this incident in simple business English.
 
-STRICT INVESTIGATION RULES:
+Incident: {incident}
 
-1. Always use the available tools to retrieve actual incident evidence.
-2. Treat tool output as the only source of factual evidence.
-3. Never invent transaction IDs, customer IDs, amounts, or incident counts.
-4. Clearly distinguish:
-   - Observed facts: Directly available in retrieved records.
-   - Possible root causes: Hypotheses requiring further investigation.
-   - Potential business impact: Risks, not confirmed losses.
-5. Never claim financial loss, customer churn, or incorrect charges
-   unless retrieved evidence explicitly proves it.
-6. If the exact root cause is unknown, explicitly state:
-   "The exact root cause cannot be confirmed from the available evidence."
-7. Never automatically generate or assign missing customer IDs.
-8. Never modify, delete, or update transaction records.
-9. Recommend quarantine, validation, reconciliation, and human approval
-   wherever appropriate.
-10. Never describe a recommended action as already completed.
+Verified evidence:
+{json.dumps(evidence_summary)}
 
-RESPONSE FORMAT:
+Rules:
+- Use only supplied facts.
+- Never invent numbers, causes or financial losses.
+- Do not claim fraud.
+- Do not recommend automatic corrections.
+- Keep your explanation under 80 words.
+- If the root cause is unknown, say so.
 
-1. Incident Summary
-2. Actual Evidence
-3. Root Cause Analysis
-4. Potential Business Impact
-5. Recommended Remediation
-6. Evidence Gaps
-
-Keep the response concise and professional.
-Do not present assumptions as confirmed facts.
+Return only the explanation.
 """
 
+    response = requests.post(
+        OLLAMA_URL,
+        json={
+            "model": MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            "stream": False,
+            "options": {
+                "temperature": 0,
+                "num_predict": 120,
+                "num_ctx": 2048,
+            },
+        },
+        timeout=300,
+    )
 
-def execute_tool(name, arguments):
+    response.raise_for_status()
 
-    if name == "get_incident_summary":
-        return investigate_incidents()
+    return response.json()["message"]["content"].strip()
 
-    if name == "get_incident_evidence":
 
-        issue_type = arguments.get("issue_type")
+def build_evidence_summary(result):
+    """Build a compact summary from verified Python evidence."""
 
-        allowed_issues = investigate_incidents()["incident_types"]
+    evidence = result["sample_evidence"]
+    incident = result["incident"]
 
-        if issue_type not in allowed_issues:
-            return {"error": "Invalid incident type"}
+    summary = {
+        "incident": incident,
+        "affected_records": result["affected_records"],
+        "validated_records": len(evidence),
+        "root_cause": "Not established",
+        "evidence_validation": "PASSED",
+    }
 
-        evidence = get_incident_evidence(issue_type)
+    if incident == "UNEXPECTED_SCHEMA_COLUMNS":
+        summary["unexpected_fields"] = sorted({
+            field
+            for item in evidence
+            for field in item.get("unexpected_fields", [])
+        })
 
-        return {
-            "incident": issue_type,
-            "affected_records": len(evidence),
-            "sample_evidence": evidence[:3],
-        }
+    elif incident == "NEGATIVE_AMOUNT":
+        summary["negative_amount_records"] = len(evidence)
 
-    return {"error": f"Unknown tool: {name}"}
+    elif incident == "MISSING_AMOUNT":
+        summary["missing_amount_records"] = len(evidence)
+
+    elif incident == "MISSING_CUSTOMER_ID":
+        summary["missing_customer_id_records"] = len(evidence)
+
+    elif incident == "DUPLICATE_TRANSACTION_ID":
+        summary["duplicate_issue_records"] = len(evidence)
+
+    return summary
+
+
+def build_report(incident, summary, explanation, validation):
+    """Generate factual report sections using Python."""
+
+    lines = [
+        "\n========== DATAGUARD AI INCIDENT REPORT ==========",
+        "\n1. INCIDENT SUMMARY",
+        f"Incident type: {incident}",
+        f"Affected records: {summary['affected_records']}",
+        "\n2. CONFIRMED EVIDENCE",
+        f"Validated records: {validation['validated_records']}",
+    ]
+
+    if "unexpected_fields" in summary:
+        lines.append(
+            f"Unexpected fields: {', '.join(summary['unexpected_fields'])}"
+        )
+
+    lines.extend([
+        "\n3. ROOT CAUSE ANALYSIS",
+        "Exact root cause: Not established. Further investigation is required.",
+        "\n4. BUSINESS-FRIENDLY EXPLANATION",
+        explanation,
+        "\n5. RECOMMENDED REMEDIATION",
+        "Investigate the source data and identify the cause.",
+        "Prepare a correction plan and obtain human approval before applying changes.",
+        "\n6. EVIDENCE GAPS",
+        "The originating cause has not yet been confirmed.",
+        "\n7. EVIDENCE VALIDATION",
+        f"Validation status: {'PASSED' if validation['valid'] else 'FAILED'}",
+        f"Records validated: {validation['validated_records']}",
+        f"Validation errors: {len(validation['errors'])}",
+        "\n===================================================",
+    ])
+
+    return "\n".join(lines)
 
 
 def run_agent(question):
 
-    messages = [
-        {
-            "role": "system",
-            "content": SYSTEM_PROMPT,
-        },
-        {
-            "role": "user",
-            "content": question,
-        },
+    summary = investigate_incidents()
+
+    issue_types = [
+        "MISSING_CUSTOMER_ID",
+        "NEGATIVE_AMOUNT",
+        "MISSING_AMOUNT",
+        "UNEXPECTED_SCHEMA_COLUMNS",
+        "DUPLICATE_TRANSACTION_ID",
     ]
 
-    for step in range(5):
+    selected_issue = next(
+        (
+            issue
+            for issue in issue_types
+            if issue.lower() in question.lower()
+        ),
+        None,
+    )
 
-        response = requests.post(
-            OLLAMA_URL,
-            json={
-                "model": MODEL,
-                "messages": messages,
-                "tools": TOOLS,
-                "stream": False,
-            },
-            timeout=180,
+    if not selected_issue:
+        return (
+            "Please specify one supported incident type:\n"
+            + "\n".join(issue_types)
         )
 
-        response.raise_for_status()
+    print(f"\nPython selected incident: {selected_issue}")
 
-        assistant_message = response.json()["message"]
+    result = investigate_incident(selected_issue)
 
-        messages.append(assistant_message)
+    if "error" in result:
+        return json.dumps(result, indent=2)
 
-        tool_calls = assistant_message.get("tool_calls", [])
+    validation = validate_investigation_result(result)
 
-        if not tool_calls:
-            return assistant_message.get("content", "")
+    print("\n========== PYTHON VALIDATION ==========")
+    print(json.dumps(validation, indent=2))
 
-        for tool_call in tool_calls:
+    if not validation["valid"]:
+        return (
+            "Investigation blocked: Evidence validation failed.\n"
+            + json.dumps(validation, indent=2)
+        )
 
-            function = tool_call["function"]
+    evidence_summary = build_evidence_summary(result)
 
-            tool_name = function["name"]
+    print("\nEvidence validated. Generating AI explanation...")
 
-            arguments = function.get("arguments", {})
+    try:
+        explanation = generate_ai_explanation(
+            selected_issue,
+            evidence_summary,
+        )
 
-            print(f"\nAgent selected tool: {tool_name}")
-            print(f"Arguments: {arguments}")
+    except requests.RequestException as error:
+        print(f"\nOllama unavailable: {error}")
 
-            result = execute_tool(tool_name, arguments)
+        explanation = (
+            "AI explanation is unavailable. "
+            "The verified Python investigation results are still available."
+        )
 
-            messages.append({
-                "role": "tool",
-                "content": json.dumps(result),
-            })
+    report = build_report(
+        selected_issue,
+        evidence_summary,
+        explanation,
+        validation,
+    )
 
-    return "Investigation stopped after reaching the tool-call limit."
+    print(report)
+
+    # Human-in-the-loop remediation workflow
+    approval_result = run_remediation_workflow(
+        result,
+        validation,
+    )
+
+    return (
+        "\n========== FINAL WORKFLOW STATUS ==========\n"
+        f"Incident: {selected_issue}\n"
+        f"Human decision: {approval_result['decision']}\n"
+        f"Execution status: {approval_result['execution_status']}\n"
+        "No transaction data was modified."
+    )
 
 
 if __name__ == "__main__":
@@ -179,17 +234,11 @@ if __name__ == "__main__":
     print("\nAgent is investigating...\n")
 
     try:
-
-        result = run_agent(question)
-
-        print("\n========== INVESTIGATION REPORT ==========")
-
-        print(result)
+        final_status = run_agent(question)
+        print(final_status)
 
     except requests.RequestException as error:
-
         print(f"Ollama connection error: {error}")
 
     except Exception as error:
-
         print(f"Agent error: {error}")
